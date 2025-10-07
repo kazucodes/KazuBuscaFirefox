@@ -1,28 +1,29 @@
 {
   "manifest_version": 3,
   "name": "KazuBuscaFirefox",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Destaca camisas/cartões pelo número digitado. Painel fixo, seta ajustável, filtros anti falso-positivo.",
   "permissions": ["storage", "activeTab", "clipboardWrite", "tabs"],
-  "host_permissions": ["*://*/*"],
+  "host_permissions": ["<all_urls>"],
   "action": {
     "default_title": "KazuBuscaFirefox",
     "default_popup": "popup.html"
   },
   "content_scripts": [
     {
-      "matches": ["*://*/*"],
+      "matches": ["<all_urls>"],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_end"
     }
   ],
   "web_accessible_resources": [
     {
       "resources": [
-        "app/*.js",
-        "app/**/*.js"
+        "app/state.js",
+        "app/ui.js",
+        "app/main.js"
       ],
-      "matches": ["*://*/*"]
+      "matches": ["<all_urls>"]
     }
   ],
   "browser_specific_settings": {

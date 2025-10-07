@@ -513,3 +513,121 @@
 
 
 })();
+
+// === KBF DYNAMIC SCHEDULER (drop-in) ===
+(() => {
+  const STORAGE_KEY = "kbf:autoDelayMs";
+  const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, Math.round(Number(n) || 0)));
+
+  function readDelay() {
+    const v = Number(localStorage.getItem(STORAGE_KEY));
+    return Number.isFinite(v) ? v : 120; // fallback
+  }
+  function writeDelay(ms) {
+    localStorage.setItem(STORAGE_KEY, String(clamp(ms, 0, 10000)));
+  }
+
+  // estado global mínimo, sem ESM
+  window.kbf = window.kbf || {};
+  window.kbf.getDelayMs = () => readDelay();
+  window.kbf.setDelayMs = (ms) => { writeDelay(ms); window.kbf.schedule(); };
+
+  let _t = 0;
+
+  function runScan() {
+    // chame sua lógica real aqui:
+    try {
+      if (typeof window.kazuCore?.rescan === "function") window.kazuCore.rescan();
+      else if (typeof rescan === "function") rescan();
+    } catch {}
+    try {
+      if (typeof window.kazuCore?.draw === "function") window.kazuCore.draw();
+      else if (typeof draw === "function") draw();
+    } catch {}
+  }
+
+  function schedule() {
+    clearTimeout(_t);
+    _t = setTimeout(runScan, window.kbf.getDelayMs());
+    // debug opcional:
+    // console.log("[kbf] next run in", window.kbf.getDelayMs(), "ms");
+  }
+  function scheduleImmediate() { clearTimeout(_t); runScan(); }
+
+  window.kbf.schedule = schedule;
+  window.kbf.scheduleImmediate = scheduleImmediate;
+
+  // se outras partes do código chamam "schedule()", redireciona pra cá:
+  try { window.schedule = schedule; } catch {}
+})();
+
+// === KBF DELAY BINDINGS (drop-in) ===
+(() => {
+  // tenta achar no documento ou em shadow roots comuns
+  function findDelayElements() {
+    const ids = {
+      dec: "#kbf-delay-dec",
+      input: "#kbf-delay",
+      inc: "#kbf-delay-inc",
+      label: "#kbf-delay-label",
+    };
+
+    // tenta no document
+    const inDoc = {
+      dec: document.querySelector(ids.dec),
+      input: document.querySelector(ids.input),
+      inc: document.querySelector(ids.inc),
+      label: document.querySelector(ids.label),
+    };
+    if (inDoc.input || inDoc.dec || inDoc.inc) return inDoc;
+
+    // tenta hosts comuns (ajuste se seu host tiver um id/classe diferente)
+    const hosts = Array.from(document.querySelectorAll("#kbf-panel, [data-kbf-panel], .kbf-panel"));
+    for (const host of hosts) {
+      const root = host.shadowRoot || host; // se não for shadow, usa o próprio host
+      const got = {
+        dec: root.querySelector(ids.dec),
+        input: root.querySelector(ids.input),
+        inc: root.querySelector(ids.inc),
+        label: root.querySelector(ids.label),
+      };
+      if (got.input || got.dec || got.inc) return got;
+    }
+    return null;
+  }
+
+  function clamp(n, lo, hi) { n = Number(n) || 0; return Math.min(hi, Math.max(lo, Math.round(n))); }
+
+  function wire() {
+    const els = findDelayElements();
+    if (!els) return false;
+
+    const step = 50, MIN = 0, MAX = 10000;
+    const setUI = (v) => {
+      if (els.input) els.input.value = String(v);
+      if (els.label) els.label.textContent = `${v} ms`;
+    };
+
+    // inicial
+    setUI(window.kbf.getDelayMs());
+
+    const apply = (v) => {
+      const ms = clamp(v, MIN, MAX);
+      window.kbf.setDelayMs(ms);     // salva e re-agenda
+      setUI(ms);
+    };
+
+    els.input?.addEventListener("input",  (e) => apply(e.target.value));
+    els.input?.addEventListener("change", (e) => apply(e.target.value));
+    els.dec?.addEventListener("click", () => apply((Number(els.input?.value) || window.kbf.getDelayMs()) - step));
+    els.inc?.addEventListener("click", () => apply((Number(els.input?.value) || window.kbf.getDelayMs()) + step));
+
+    return true;
+  }
+
+  // tenta já; se o painel aparecer depois, observa DOM e tenta de novo
+  if (!wire()) {
+    const mo = new MutationObserver(() => { if (wire()) try { mo.disconnect(); } catch {} });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  }
+})();

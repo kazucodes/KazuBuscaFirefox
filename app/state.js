@@ -1,39 +1,71 @@
-export const storage = (typeof browser!=="undefined" ? browser.storage.local : chrome.storage.local);
+// app/state.js — estado global + persistência
+(function (global) {
+  "use strict";
 
-const excludedSet = (globalThis.excluded instanceof Set) ? globalThis.excluded : new Set();
-globalThis.excluded = excludedSet;
+  const STORAGE_DELAY   = "kbf_delay";
+  const STORAGE_ENABLED = "kbf_enabled";
 
+  function clamp(n, lo, hi) {
+    n = Number(n);
+    if (!Number.isFinite(n)) n = lo;
+    n = Math.round(n);
+    return Math.min(hi, Math.max(lo, n));
+  }
 
-
-export const state = {
-  enabled: true,
-  panelVisible: true,
-  targetNumber: null,
-  arrowGap: 230,
-  autoDelayMs: 300,
-  deleteMode: false,
-  // coleções
-  excluded: excludedSet,
-};
-
-export const isIgnored     = k => state.excluded.has(k);
-export const addIgnored    = k => state.excluded.add(k);
-export const removeIgnored = k => state.excluded.delete(k);
-export const clearIgnored  = () => state.excluded.clear();
-
-export async function loadPersisted(){
-  try{
-    const res = await storage.get(["kbf_last_target","kbf_gap","kbf_ignored","kbf_panel_visible"]);
-    state.targetNumber = (res.kbf_last_target||"").trim() || null;
-    if (Number.isFinite(res.kbf_gap)) state.arrowGap = res.kbf_gap;
-    if (Array.isArray(res.kbf_ignored)) {
-      state.excluded.clear();
-      for (const k of res.kbf_ignored) state.excluded.add(k);
+  const storage = {
+    async get(key, defVal) {
+      try {
+        if (typeof browser !== "undefined" && browser.storage?.local) {
+          const o = await browser.storage.local.get(key);
+          return o && o[key] !== undefined ? o[key] : defVal;
+        }
+        if (typeof chrome !== "undefined" && chrome.storage?.local) {
+          const o = await new Promise(r => chrome.storage.local.get(key, r));
+          return o && o[key] !== undefined ? o[key] : defVal;
+        }
+      } catch {}
+      try { const raw = localStorage.getItem(key); return raw == null ? defVal : JSON.parse(raw); }
+      catch { return defVal; }
+    },
+    async set(obj) {
+      try {
+        if (typeof browser !== "undefined" && browser.storage?.local) return void (await browser.storage.local.set(obj));
+        if (typeof chrome !== "undefined" && chrome.storage?.local)  return void (await new Promise(r => chrome.storage.local.set(obj, r)));
+      } catch {}
+      try { for (const k in obj) localStorage.setItem(k, JSON.stringify(obj[k])); } catch {}
     }
-    if (typeof res.kbf_panel_visible === "boolean") state.panelVisible = res.kbf_panel_visible;
-  }catch{}
-}
+  };
 
-export async function persistIgnored(){
-  try{ await storage.set({ kbf_ignored: Array.from(state.excluded) }); }catch{}
-}
+  const state = global.state || {
+    enabled: true,
+    autoDelayMs: 120
+  };
+  global.state = state;
+
+  async function loadState() {
+    state.autoDelayMs = clamp(await storage.get(STORAGE_DELAY, state.autoDelayMs ?? 120), 0, 10000);
+    state.enabled     = !!(await storage.get(STORAGE_ENABLED, state.enabled ?? true));
+  }
+
+  async function setDelayMs(ms) {
+    state.autoDelayMs = clamp(ms, 0, 10000);
+    await storage.set({ [STORAGE_DELAY]: state.autoDelayMs });
+  }
+
+  function getDelayMs() {
+    return clamp(state.autoDelayMs ?? 120, 0, 10000);
+  }
+
+  async function setEnabled(on) {
+    state.enabled = !!on;
+    await storage.set({ [STORAGE_ENABLED]: state.enabled });
+  }
+
+  global.kbf = Object.assign(global.kbf || {}, {
+    state,
+    loadState,
+    setDelayMs,
+    getDelayMs,
+    setEnabled
+  });
+})(window);

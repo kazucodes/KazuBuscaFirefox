@@ -1,59 +1,59 @@
-// app/delay-controls.js — liga os controles de delay do painel
+// app/delay-controls.js — conecta os controles do SEU overlay ao estado e reagenda
+(function (global) {
+  "use strict";
 
-const STORAGE_KEY = "kbf_delay";
-const clamp = (n, lo, hi) => {
-  n = Number(n); if (!Number.isFinite(n)) return lo;
-  n = Math.round(n); return Math.min(hi, Math.max(lo, n));
-};
+  const kbf = global.kbf || (global.kbf = {});
+  const state = kbf.state || (global.state ||= { enabled: true, autoDelayMs: 120 });
 
-async function storageGet(key, def) {
-  try {
-    if (typeof browser !== "undefined" && browser.storage?.local) {
-      const o = await browser.storage.local.get(key);
-      return o?.[key] ?? def;
-    }
-    if (typeof chrome !== "undefined" && chrome.storage?.local) {
-      const o = await new Promise(r => chrome.storage.local.get(key, r));
-      return o?.[key] ?? def;
-    }
-  } catch {}
-  try { const raw = localStorage.getItem(key); return raw == null ? def : JSON.parse(raw); } catch { return def; }
-}
+  const setDelayMs = kbf.setDelayMs || (v => { state.autoDelayMs = v; });
+  const schedule   = () => (kbf.schedule ? kbf.schedule() : void 0);
 
-async function storageSet(obj) {
-  try {
-    if (typeof browser !== "undefined" && browser.storage?.local) return void await browser.storage.local.set(obj);
-    if (typeof chrome !== "undefined" && chrome.storage?.local)  return void await new Promise(r => chrome.storage.local.set(obj, r));
-  } catch {}
-  try { for (const [k,v] of Object.entries(obj)) localStorage.setItem(k, JSON.stringify(v)); } catch {}
-}
-
-export async function wireDelayControls({ root, state, onChange }) {
-  const input = root.querySelector("#kbf-delay");
-  const dec   = root.querySelector("#kbf-delay-dec");
-  const inc   = root.querySelector("#kbf-delay-inc");
-  const label = root.querySelector("#kbf-delay-label");
-
-  if (!input && !dec && !inc) return false;
-
-  // valor inicial: storage -> state -> UI
-  const saved = await storageGet(STORAGE_KEY, state.autoDelayMs ?? 120);
-  state.autoDelayMs = clamp(saved, 0, 10000);
-  if (input) input.value = String(state.autoDelayMs);
-  if (label) label.textContent = `${state.autoDelayMs} ms`;
-
-  const apply = async (val) => {
-    state.autoDelayMs = clamp(val, 0, 10000);
-    if (input) input.value = String(state.autoDelayMs);
-    if (label) label.textContent = `${state.autoDelayMs} ms`;
-    await storageSet({ [STORAGE_KEY]: state.autoDelayMs });
-    onChange?.();
+  const clamp = (n) => {
+    n = Number(n); if (!Number.isFinite(n)) n = 120;
+    n = Math.round(n);
+    return Math.min(10000, Math.max(0, n));
   };
 
-  input?.addEventListener("input",  e => apply(e.target.value));
-  input?.addEventListener("change", e => apply(e.target.value));
-  dec  ?.addEventListener("click", e => { e.preventDefault(); const step = Number(input?.step)||50; apply((Number(input?.value)||state.autoDelayMs)-step); });
-  inc  ?.addEventListener("click", e => { e.preventDefault(); const step = Number(input?.step)||50; apply((Number(input?.value)||state.autoDelayMs)+step); });
+  function panelRoot() {
+    const host = document.getElementById("kbf-panel") ||
+                 document.querySelector("[data-kbf-panel], .kbf-panel");
+    return (host && (host.shadowRoot || host)) || document;
+  }
 
-  return true;
-}
+  function wireOnce() {
+    const root  = panelRoot();
+    const input = root.querySelector("#kbf-delay");
+    const dec   = root.querySelector("#kbf-delay-dec");
+    const inc   = root.querySelector("#kbf-delay-inc");
+    const label = root.querySelector("#kbf-delay-label");
+
+    if (!input && !dec && !inc) return false;           // seu overlay ainda não montou
+    if (input && input.dataset.kbfWired === "1") return true;
+
+    // estado -> UI (nunca vazio)
+    input && (input.value = String(state.autoDelayMs ?? 120));
+    label && (label.textContent = `${state.autoDelayMs ?? 120} ms`);
+
+    const apply = async (val) => {
+      const v = clamp(val);
+      await Promise.resolve(setDelayMs(v));
+      if (input) input.value = String(v);
+      if (label) label.textContent = `${v} ms`;
+      schedule();
+    };
+
+    input?.addEventListener("input",  (e) => apply(e.target.value));
+    input?.addEventListener("change", (e) => apply(e.target.value));
+    dec  ?.addEventListener("click",  (e) => { e.preventDefault(); const step = Number(input?.step)||50; apply((Number(input?.value)||state.autoDelayMs||120)-step); });
+    inc  ?.addEventListener("click",  (e) => { e.preventDefault(); const step = Number(input?.step)||50; apply((Number(input?.value)||state.autoDelayMs||120)+step); });
+
+    if (input) input.dataset.kbfWired = "1";
+    return true;
+  }
+
+  // liga agora; se o painel montar depois (SPA), observa e liga
+  if (!wireOnce()) {
+    const mo = new MutationObserver(() => { if (wireOnce()) try { mo.disconnect(); } catch {} });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+  }
+})(window);

@@ -1,83 +1,39 @@
-// app/state.js — estado + persistência (Firefox WebExtension)
+export const storage = (typeof browser!=="undefined" ? browser.storage.local : chrome.storage.local);
+
+const excludedSet = (globalThis.excluded instanceof Set) ? globalThis.excluded : new Set();
+globalThis.excluded = excludedSet;
+
+
 
 export const state = {
   enabled: true,
-  autoDelayMs: 120, // padrão do painel
+  panelVisible: true,
+  targetNumber: null,
+  arrowGap: 230,
+  autoDelayMs: 300,
+  deleteMode: false,
+  // coleções
+  excluded: excludedSet,
 };
 
-const KEYS = {
-  enabled: "kbf:enabled",
-  autoDelayMs: "kbf:autoDelayMs",
-};
+export const isIgnored     = k => state.excluded.has(k);
+export const addIgnored    = k => state.excluded.add(k);
+export const removeIgnored = k => state.excluded.delete(k);
+export const clearIgnored  = () => state.excluded.clear();
 
-const toBool = (v, fb = true) =>
-  typeof v === "boolean" ? v :
-  (v === "true" || v === 1 || v === "1") ? true :
-  (v === "false" || v === 0 || v === "0") ? false : fb;
-
-const toMs = (v, fb = 120) => {
-  const n = Number(v);
-  return Number.isFinite(n) && n >= 0 ? Math.round(n) : fb;
-};
-
-async function storageSet(obj) {
-  try {
-    if (typeof browser !== "undefined" && browser.storage?.local) {
-      await browser.storage.local.set(obj);
-    } else if (typeof chrome !== "undefined" && chrome.storage?.local) {
-      await new Promise((r) => chrome.storage.local.set(obj, r));
-    } else {
-      for (const [k, v] of Object.entries(obj)) localStorage.setItem(k, JSON.stringify(v));
+export async function loadPersisted(){
+  try{
+    const res = await storage.get(["kbf_last_target","kbf_gap","kbf_ignored","kbf_panel_visible"]);
+    state.targetNumber = (res.kbf_last_target||"").trim() || null;
+    if (Number.isFinite(res.kbf_gap)) state.arrowGap = res.kbf_gap;
+    if (Array.isArray(res.kbf_ignored)) {
+      state.excluded.clear();
+      for (const k of res.kbf_ignored) state.excluded.add(k);
     }
-  } catch {}
+    if (typeof res.kbf_panel_visible === "boolean") state.panelVisible = res.kbf_panel_visible;
+  }catch{}
 }
 
-async function storageGet(keys) {
-  try {
-    if (typeof browser !== "undefined" && browser.storage?.local) {
-      return await browser.storage.local.get(keys);
-    } else if (typeof chrome !== "undefined" && chrome.storage?.local) {
-      return await new Promise((r) => chrome.storage.local.get(keys, r));
-    } else {
-      const out = {};
-      for (const k of keys) {
-        const raw = localStorage.getItem(k);
-        out[k] = raw ? JSON.parse(raw) : undefined;
-      }
-      return out;
-    }
-  } catch {
-    return {};
-  }
-}
-
-export async function loadPersisted() {
-  const data = await storageGet([KEYS.enabled, KEYS.autoDelayMs]);
-
-  if (Object.prototype.hasOwnProperty.call(data, KEYS.enabled)) {
-    state.enabled = toBool(data[KEYS.enabled], state.enabled);
-  }
-  if (Object.prototype.hasOwnProperty.call(data, KEYS.autoDelayMs)) {
-    state.autoDelayMs = toMs(data[KEYS.autoDelayMs], state.autoDelayMs);
-  }
-
-  try {
-    (browser?.storage || chrome?.storage)?.onChanged.addListener?.((changes, area) => {
-      if (area !== "local" && area !== "sync") return;
-      if (changes[KEYS.enabled])    state.enabled    = toBool(changes[KEYS.enabled].newValue, state.enabled);
-      if (changes[KEYS.autoDelayMs]) state.autoDelayMs = toMs(changes[KEYS.autoDelayMs].newValue, state.autoDelayMs);
-    });
-  } catch {}
-}
-
-export async function setEnabled(on) {
-  state.enabled = toBool(on, state.enabled);
-  await storageSet({ [KEYS.enabled]: state.enabled });
-  return state.enabled;
-}
-
-export async function setAutoDelayMs(ms) {
-  state.autoDelayMs = toMs(ms, state.autoDelayMs);
-  await storageSet({ [KEYS.autoDelayMs]: state.autoDelayMs });
-  return state.autoDelayMs;
+export async function persistIgnored(){
+  try{ await storage.set({ kbf_ignored: Array.from(state.excluded) }); }catch{}
 }

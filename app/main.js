@@ -1,83 +1,67 @@
-// app/main.js — agendador único lendo o delay do estado (sem debounce fixo)
 import { state, loadPersisted } from "./state.js";
-import { wirePanel } from "./ui.js";
+import { ric, debounce } from "./utils.js";
+import { mountOverlay } from "./overlay.js";
+import { wirePanel, drawBadges, clearBoxes, repositionMarkers, updateCounter } from "./ui.js";
+import { collectIcons, collectNumbers } from "./detect.js";
+import { pairIconsAndNumbers } from "./pair.js";
 
-let _timer = 0;
+let icons=[], nums=[], pairs=[];
+let scanScheduled=false, tickerActive=false, lastScrollTs=0, stopped=false;
 
-function clearPending() {
-  if (_timer) { clearTimeout(_timer); _timer = 0; }
+function rescan(){
+  const root = document;
+  icons = collectIcons(root);
+  nums  = collectNumbers(root);
+  pairs = pairIconsAndNumbers(icons, nums);
+  updateCounter({icons, nums, pairs});
 }
+function draw(){ drawBadges({pairs}); }
+const schedule = debounce(()=>{ if(stopped||!state.enabled) return; rescan(); draw(); }, 120);
 
-function schedule() {
-  clearPending();
-  const ms = Math.max(0, Number(state.autoDelayMs) || 0);
-  console.log("[KBF] schedule in", ms, "ms");
-  _timer = setTimeout(runScan, ms);
-}
-
-function scheduleImmediate() {
-  clearPending();
-  console.log("[KBF] scheduleImmediate");
-  runScan();
-}
-
-function runScan() {
-  if (!state.enabled) { console.log("[KBF] skipped (disabled)"); return; }
-  console.log("[KBF] runScan at", performance.now().toFixed(1));
-
-  // chame suas funções reais (não quebra se não existirem):
-  try {
-    if (typeof window.kazuCore?.rescan === "function") window.kazuCore.rescan();
-    else if (typeof rescan === "function") rescan();
-  } catch (e) { console.debug("[KBF] rescan error", e); }
-
-  try {
-    if (typeof window.kazuCore?.draw === "function") window.kazuCore.draw();
-    else if (typeof draw === "function") draw();
-  } catch (e) { console.debug("[KBF] draw error", e); }
-}
-
-function attachInputListeners(root = document) {
-  const sel = 'input[type="text"], input[type="search"], textarea, [contenteditable="true"]';
-  for (const el of root.querySelectorAll(sel)) {
-    el.removeEventListener("input", schedule);
-    el.addEventListener("input", schedule);
+function onAnyScroll(){
+  lastScrollTs=performance.now();
+  if(!tickerActive){
+    tickerActive=true;
+    const tick=()=>{
+      repositionMarkers({pairs});
+      if(performance.now()-lastScrollTs<150){ requestAnimationFrame(tick); } else { tickerActive=false; }
+    };
+    requestAnimationFrame(tick);
   }
 }
 
-function observeDomForInputs() {
-  const mo = new MutationObserver((muts) => {
-    for (const m of muts) {
-      if (m.type === "childList" && (m.addedNodes?.length || m.removedNodes?.length)) {
-        attachInputListeners(document);
-        schedule();
-      }
-    }
-  });
-  mo.observe(document.documentElement, { childList: true, subtree: true });
-  return mo;
+export async function start(registerStop){
+  stopped=false;
+
+  // listeners (uma vez)
+  window.addEventListener("scroll", onAnyScroll, {passive:true, capture:true});
+  window.addEventListener("wheel",  onAnyScroll, {passive:true});
+  window.addEventListener("touchmove", onAnyScroll, {passive:true});
+  window.visualViewport && window.visualViewport.addEventListener("scroll", onAnyScroll, {passive:true});
+  window.visualViewport && window.visualViewport.addEventListener("resize", onAnyScroll, {passive:true});
+  window.addEventListener("resize", schedule, {passive:true});
+
+  const mo = new MutationObserver(()=>{ if(scanScheduled) return; scanScheduled=true; ric(()=>{scanScheduled=false; schedule();}); });
+  mo.observe(document.documentElement,{childList:true,subtree:true,attributes:true});
+
+  await loadPersisted();
+  const ui = mountOverlay();              // desenha painel/host
+  wirePanel({ui, state, schedule, pairs, icons, nums}); // conecta botões
+
+  // Primeira varredura
+  rescan(); draw();
+
+  // watchdog: se não achar nada, relaxa reprocessando
+  setInterval(()=>{ if(stopped || !state.enabled) return;
+    if (icons.length===0 || pairs.length===0) { rescan(); draw(); }
+  }, 1200);
+
+  // debug helper
+  window.KBF = {
+    ping(){ console.log("KBF:", {icons:icons.length, nums:nums.length, pairs:pairs.length, target:state.targetNumber}); },
+  };
+
+  registerStop && registerStop(()=>{ stopped=true; mo.disconnect(); clearBoxes(); });
 }
 
-(async function bootstrap() {
-  console.log("[KBF] main.js LOADED");
-  await loadPersisted();
-
-  wirePanel({ schedule, scheduleImmediate });
-
-  attachInputListeners(document);
-  const mo = observeDomForInputs();
-
-  // helpers p/ depurar no console do content script
-  Object.assign(window, {
-    kazu: {
-      state,
-      schedule,
-      scheduleImmediate,
-      clearPending,
-      destroy() { try { mo.disconnect(); } catch {}; clearPending(); },
-    },
-  });
-
-  // opcional: dispare uma primeira execução
-  // schedule();
-})();
+export function stop(){ /* preenchido via registerStop no content.js */ }

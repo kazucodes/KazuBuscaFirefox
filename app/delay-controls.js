@@ -1,56 +1,59 @@
-// delay-controls.js
-// Liga os elementos: #delayMinus, #delayInput, #delayPlus
-// ao estado (browser.storage.local) e chama window.kazu.schedule()
-// sempre que o valor mudar.
+// app/delay-controls.js — liga os controles de delay do painel
 
-import { state, setDelayMs } from "./state.js";
+const STORAGE_KEY = "kbf_delay";
+const clamp = (n, lo, hi) => {
+  n = Number(n); if (!Number.isFinite(n)) return lo;
+  n = Math.round(n); return Math.min(hi, Math.max(lo, n));
+};
 
-const STEP = 50;      // incremento dos botões
-const MIN  = 0;
-const MAX  = 10000;
-
-function clamp(n, lo, hi) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return lo;
-  return Math.min(hi, Math.max(lo, Math.round(x)));
+async function storageGet(key, def) {
+  try {
+    if (typeof browser !== "undefined" && browser.storage?.local) {
+      const o = await browser.storage.local.get(key);
+      return o?.[key] ?? def;
+    }
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      const o = await new Promise(r => chrome.storage.local.get(key, r));
+      return o?.[key] ?? def;
+    }
+  } catch {}
+  try { const raw = localStorage.getItem(key); return raw == null ? def : JSON.parse(raw); } catch { return def; }
 }
 
-async function applyDelay(ms) {
-  const v = clamp(ms, MIN, MAX);
-  const inputEl = document.getElementById("delayInput");
-  if (inputEl) inputEl.value = String(v);    // reflete na UI
-  await setDelayMs(v);                       // persiste e atualiza state.delayMs
-  try { window.kazu?.schedule?.(); } catch {}// reagenda com o NOVO delay
-  console.debug("[delay] agora =", v, "ms");
+async function storageSet(obj) {
+  try {
+    if (typeof browser !== "undefined" && browser.storage?.local) return void await browser.storage.local.set(obj);
+    if (typeof chrome !== "undefined" && chrome.storage?.local)  return void await new Promise(r => chrome.storage.local.set(obj, r));
+  } catch {}
+  try { for (const [k,v] of Object.entries(obj)) localStorage.setItem(k, JSON.stringify(v)); } catch {}
 }
 
-function initDelayControls() {
-  const minusBtn = document.getElementById("delayMinus");
-  const inputEl  = document.getElementById("delayInput");
-  const plusBtn  = document.getElementById("delayPlus");
+export async function wireDelayControls({ root, state, onChange }) {
+  const input = root.querySelector("#kbf-delay");
+  const dec   = root.querySelector("#kbf-delay-dec");
+  const inc   = root.querySelector("#kbf-delay-inc");
+  const label = root.querySelector("#kbf-delay-label");
 
-  // inicializa o input com o valor atual do estado
-  if (inputEl) inputEl.value = String(clamp(state.delayMs, MIN, MAX));
+  if (!input && !dec && !inc) return false;
 
-  minusBtn?.addEventListener("click", () => {
-    const cur = Number(inputEl?.value ?? state.delayMs) || 0;
-    applyDelay(cur - STEP);
-  });
+  // valor inicial: storage -> state -> UI
+  const saved = await storageGet(STORAGE_KEY, state.autoDelayMs ?? 120);
+  state.autoDelayMs = clamp(saved, 0, 10000);
+  if (input) input.value = String(state.autoDelayMs);
+  if (label) label.textContent = `${state.autoDelayMs} ms`;
 
-  plusBtn?.addEventListener("click", () => {
-    const cur = Number(inputEl?.value ?? state.delayMs) || 0;
-    applyDelay(cur + STEP);
-  });
+  const apply = async (val) => {
+    state.autoDelayMs = clamp(val, 0, 10000);
+    if (input) input.value = String(state.autoDelayMs);
+    if (label) label.textContent = `${state.autoDelayMs} ms`;
+    await storageSet({ [STORAGE_KEY]: state.autoDelayMs });
+    onChange?.();
+  };
 
-  // Atualiza em tempo real enquanto digita; troque para 'change' se preferir
-  inputEl?.addEventListener("input", (e) => {
-    applyDelay(e.target.value);
-  });
-}
+  input?.addEventListener("input",  e => apply(e.target.value));
+  input?.addEventListener("change", e => apply(e.target.value));
+  dec  ?.addEventListener("click", e => { e.preventDefault(); const step = Number(input?.step)||50; apply((Number(input?.value)||state.autoDelayMs)-step); });
+  inc  ?.addEventListener("click", e => { e.preventDefault(); const step = Number(input?.step)||50; apply((Number(input?.value)||state.autoDelayMs)+step); });
 
-// Garante que os elementos existam
-if (document.readyState === "loading") {
-  document.addEventListener("DOMContentLoaded", initDelayControls);
-} else {
-  initDelayControls();
+  return true;
 }

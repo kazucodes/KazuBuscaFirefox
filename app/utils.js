@@ -31,13 +31,3 @@ export function getTopSafeMargin(){
   });
   return Math.max(MIN, Math.min(MAX, Math.ceil(maxBottom)+EXTRA));
 }
-
-export function debounceDynamic(fn, getWait) {
-  let t = null;
-  return (...args) => {
-    const wait = Math.max(0, Number(getWait?.() ?? 0));
-    clearTimeout(t);
-    t = setTimeout(() => fn(...args), wait);
-  };
-}
-

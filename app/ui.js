@@ -1,94 +1,102 @@
 // app/ui.js
-import { state, storage, addIgnored, isIgnored, persistIgnored } from "./state.js";
+import { state, setArrowGap, setAutoDelay, setPanelVisible, setTargetNumber, setDeleteMode, setScopeEl, persistExcluded } from "./state.js";
 
-// guarda refs do overlay/painel
-let UI = null;
-
-// render atual
-let rendered = []; // [{pair, key, mEl, aEl}]
-let typingTimer = null;
-
-const AUTO_DELAY_MS = 300;        // auto-marcar após digitar
-const BADGE_W = 28, BADGE_H = 28; // devem casar com CSS do overlay
-const ARROW_W = 26, ARROW_H = 18;
+// ========= helpers locais (UI) =========
 const EDGE_PAD = 2;
+const BADGE_W = 28, BADGE_H = 28, BADGE_GAP = 8;
+const ARROW_W = 26, ARROW_H = 18;
 
-
-// util: viewport real (visualViewport)
-function getVP() {
+const getVP = () => {
   const v = window.visualViewport;
-  return v ? { x: v.offsetLeft, y: v.offsetTop, w: v.width, h: v.height }
-           : { x: 0,            y: 0,           w: window.innerWidth, h: window.innerHeight };
+  return v ? { x: v.offsetLeft, y: v.offsetTop, w: v.width, h: v.height } :
+             { x: 0,            y: 0,           w: window.innerWidth, h: window.innerHeight };
+};
+
+const rectArea = (r) => Math.max(1, r.width) * Math.max(1, r.height);
+
+function getRowContainer(el) {
+  let cur = el;
+  for (let i = 0; i < 6 && cur; i++, cur = cur.parentElement) {
+    const cs = cur && getComputedStyle(cur); if (!cs) continue;
+    const isRowFlex = cs.display === "flex" && (cs.flexDirection === "row" || cs.flexDirection === "row-reverse");
+    const isGrid = cs.display === "grid" && String(cs.gridTemplateColumns || "").length > 0;
+    if (isRowFlex || isGrid) return cur;
+  }
+  return el.parentElement || el;
 }
 
-// chave estável para exclusão manual (por posição do ícone)
-function pairKey(p) {
-  const r = p.iconEl.getBoundingClientRect();
-  return `${Math.round(r.left)}x${Math.round(r.top)}`;
-}
-
-// posicionamento do selo (esquerda se couber; senão direita)
-function computeBadgePos(rect){
+function computeBadgePos(rect) {
   const V = getVP();
-  const viewportLeft  = V.x + EDGE_PAD;
+  const viewportLeft = V.x + EDGE_PAD;
   const viewportRight = V.x + V.w - EDGE_PAD;
 
-  const wantLeft = rect.left - BADGE_W - 8;
-  const leftOK   = wantLeft >= viewportLeft;
+  const wantLeft = rect.left - BADGE_W - BADGE_GAP;
+  const leftOK = wantLeft >= viewportLeft;
 
   let left, side;
   if (leftOK) { left = wantLeft; side = "left"; }
-  else        { left = rect.right + 8; side = "right"; }
+  else { left = rect.right + BADGE_GAP; side = "right"; }
 
   left = Math.min(Math.max(left, viewportLeft), viewportRight - BADGE_W);
   const top = Math.round(rect.top + V.y + (rect.height - BADGE_H) / 2);
   return { left: Math.round(left), top, side };
 }
 
-// posicionamento da seta (gap configurável)
-function computeArrowPos(iconRect){
+function computeArrowPos(rowRect, iconRect) {
   const V = getVP();
-  const viewportLeft  = V.x + EDGE_PAD;
+  const viewportLeft = V.x + EDGE_PAD;
   const viewportRight = V.x + V.w - EDGE_PAD;
 
+  const useRow = rowRect && rowRect.width >= 60 && rowRect.height >= 20;
+  const baseLeft = useRow ? rowRect.left : viewportLeft;
+  const baseRight = useRow ? rowRect.right : viewportRight;
+  const baseTop = useRow ? rowRect.top : iconRect.top;
+  const baseH = useRow ? rowRect.height : iconRect.height;
+
   let left = iconRect.right + state.arrowGap;
-  const maxLeft = viewportRight - ARROW_W;
-  const minLeft = viewportLeft;
+
+  const maxLeft = Math.min(baseRight - 12 - ARROW_W, viewportRight - ARROW_W);
+  const minLeft = Math.max(baseLeft + 12, viewportLeft);
   left = Math.min(Math.max(left, minLeft), maxLeft);
 
-  const top = Math.round(iconRect.top + V.y + (iconRect.height - ARROW_H) / 2);
+  const top = Math.round(baseTop + V.y + (baseH - ARROW_H) / 2);
   return { left: Math.round(left), top };
 }
 
-// limpa marcadores/setas
-export function clearBoxes(){
-  rendered.forEach(it => {
-    try { it.mEl?.remove(); } catch{}
-    try { it.aEl?.remove(); } catch{}
-  });
-  rendered = [];
+// ========= elementos desenhados =========
+let markers = [];     // <div class="marker">
+let arrows  = [];     // <div class="arrow">
+let boxes   = [];     // debug (não usamos agora)
+
+function clearMarkers(ui) {
+  markers.forEach(m => m.remove());
+  arrows.forEach(a => a?.remove());
+  markers = []; arrows = [];
+}
+function clearBoxes(ui) {
+  boxes.forEach(b => b.remove());
+  boxes = [];
 }
 
-// atualiza contador (atualmente sem UI; deixo no-op p/ compat.)
-export function updateCounter(){ /* opcional */ }
+// ========= exclusão (FP) =========
+function makeKeyFromPair(p) {
+  // chave estável por ícone + número
+  const r = p.iconEl.getBoundingClientRect();
+  return `k:${Math.round(r.left)}:${Math.round(r.top)}:${Math.round(r.width)}:${Math.round(r.height)}:${p.num}`;
+}
 
-// redesenha todos os selos/setas para o alvo atual
-export function drawBadges({pairs}){
-  clearBoxes();
-  if (!state.enabled || !state.targetNumber || !UI) return;
+// ========= desenho =========
+export function drawBadges(ui, pairs) {
+  clearMarkers(ui);
+  if (!state.targetNumber) return;
 
-  const target = String(state.targetNumber);
+  const matches = pairs.filter(p => p.num === state.targetNumber && !state.excluded.has(makeKeyFromPair(p)));
+
   let firstRect = null;
-
-  pairs.forEach(p=>{
-    if (String(p.num) !== target) return;
-
-    const key = pairKey(p);
-    if (isIgnored(key)) return;
-
+  matches.forEach((p, idx) => {
     const ir = p.iconEl.getBoundingClientRect();
 
-    // selo
+    // marcador
     const m = document.createElement("div");
     m.className = "marker";
     m.textContent = p.num;
@@ -96,166 +104,197 @@ export function drawBadges({pairs}){
     m.style.left = bpos.left + "px";
     m.style.top  = bpos.top  + "px";
     m.dataset.side = bpos.side;
-    // excluir falso-positivo: clique no selo quando modo Excluir estiver ativo
-    m.addEventListener("click", async (e)=>{
-      if (!state.deleteMode) return;
-      e.preventDefault(); e.stopPropagation();
-      addIgnored(key);
-      await persistIgnored();
-      // remove esse item imediatamente
-      try { m.remove(); } catch {}
-      try { a.remove(); } catch {}
-    }, true);
-
-    UI.layer.appendChild(m);
+    if (state.deleteMode) m.dataset.del = "1";
+    ui.layer.appendChild(m);
+    markers.push(m);
 
     // seta
+    const rowEl = getRowContainer(p.iconEl);
+    const rowRect = rowEl ? rowEl.getBoundingClientRect() : null;
     const a = document.createElement("div");
     a.className = "arrow";
-    const apos = computeArrowPos(ir);
+    const apos = computeArrowPos(rowRect, ir);
     a.style.left = apos.left + "px";
     a.style.top  = apos.top  + "px";
-    UI.layer.appendChild(a);
+    ui.layer.appendChild(a);
+    arrows[idx] = a;
 
-    rendered.push({ pair:p, key, mEl:m, aEl:a });
+    // click para excluir quando em modo delete
+    if (state.deleteMode) {
+      const key = makeKeyFromPair(p);
+      m.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        state.excluded.add(key);
+        persistExcluded();
+        drawBadges(ui, pairs);
+      }, { once: true });
+    }
+
     if (!firstRect) firstRect = ir;
   });
+
+  // nada de auto-scroll: mantemos a posição
 }
 
-// reposiciona no scroll/zoom
-export function repositionMarkers({pairs}){
-  if (!UI || !rendered.length) return;
-  rendered.forEach(it=>{
-    const ir = it.pair.iconEl.getBoundingClientRect();
+export function repositionMarkers(ui, pairs) {
+  if (!state.targetNumber) return;
+  const matches = pairs.filter(p => p.num === state.targetNumber && !state.excluded.has(makeKeyFromPair(p)));
 
-    const bpos = computeBadgePos(ir);
-    it.mEl.style.left = bpos.left + "px";
-    it.mEl.style.top  = bpos.top  + "px";
-    it.mEl.dataset.side = bpos.side;
+  matches.forEach((p, idx) => {
+    const ir = p.iconEl.getBoundingClientRect();
 
-    const apos = computeArrowPos(ir);
-    it.aEl.style.left = apos.left + "px";
-    it.aEl.style.top  = apos.top  + "px";
+    const m = markers[idx];
+    if (m) {
+      const bpos = computeBadgePos(ir);
+      m.style.left = bpos.left + "px";
+      m.style.top  = bpos.top  + "px";
+      m.dataset.side = bpos.side;
+      if (state.deleteMode) m.dataset.del = "1"; else m.removeAttribute("data-del");
+    }
+
+    const a = arrows[idx];
+    if (a) {
+      const rowEl = getRowContainer(p.iconEl);
+      const rowRect = rowEl ? rowEl.getBoundingClientRect() : null;
+      const apos = computeArrowPos(rowRect, ir);
+      a.style.left = apos.left + "px";
+      a.style.top  = apos.top  + "px";
+    }
   });
 }
 
-// conecta painel, botões e inputs
-export function wirePanel({ui, state, schedule}){
-  UI = ui;
+export function wirePanel(ui, { onMarkNow, onRescan, onToggleScope, onClearScope }) {
+  // valores iniciais
+  ui.gapInput.value = state.arrowGap;
+  ui.delayInput.value = state.autoDelayMs;
 
-  // aplicar visibilidade inicial do painel/fab
-  applyPanelVisibility();
+  // abrir/fechar
+  ui.btnHide.addEventListener("click", () => { setPanelVisible(false); applyPanelVisibility(ui); });
+  ui.fab.addEventListener("click", () => { setPanelVisible(true);  applyPanelVisibility(ui); });
 
-  // número: auto-mark
-  ui.input.addEventListener("input", ()=>{
+  // marcar
+  let typingTimer = null;
+  const trigger = () => onMarkNow((ui.input.value || "").trim());
+
+  ui.input.addEventListener("input", () => {
     if (typingTimer) clearTimeout(typingTimer);
-    typingTimer = setTimeout(()=> {
-      const v = (ui.input.value||"").trim();
-      if (/^\d{1,2}$/.test(v)) {
-        state.targetNumber = v;
-        storage.set({ kbf_last_target: v });
-        schedule();
-        ui.input.value = "";
-        ui.input.focus({ preventScroll:true });
-      }
-    }, AUTO_DELAY_MS);
+    const v = (ui.input.value || "").trim();
+    const base = Math.max(80, Math.min(2000, state.autoDelayMs));
+    const delay = (v.length >= 2) ? Math.max(80, Math.round(base * 0.7)) : base;
+    typingTimer = setTimeout(trigger, delay);
   });
+  ui.input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); trigger(); }
+  });
+  ui.btnGo.addEventListener("click", trigger);
 
-  ui.btnGo.addEventListener("click", ()=>{
-    const v = (ui.input.value||"").trim();
-    if (!/^\d{1,2}$/.test(v)) return;
-    state.targetNumber = v;
-    storage.set({ kbf_last_target: v });
-    schedule();
+  // limpar
+  ui.btnClear.addEventListener("click", () => {
+    setTargetNumber(null);
     ui.input.value = "";
-    ui.input.focus({ preventScroll:true });
+    clearMarkers(ui);
   });
 
-  ui.btnRescan.addEventListener("click", ()=> schedule());
+  // rescan
+  ui.btnRescan.addEventListener("click", onRescan);
 
-  ui.btnClear.addEventListener("click", ()=>{
-    state.targetNumber = null;
-    storage.set({ kbf_last_target: "" });
-    clearBoxes();
-    ui.input.value = "";
-    ui.input.focus({ preventScroll:true });
-  });
+  // escopo
+  ui.btnScope.addEventListener("click", onToggleScope);
+  ui.btnUnscope.addEventListener("click", onClearScope);
 
-  // Excluir: toggle
-  ui.btnDelMode?.addEventListener("click", ()=>{
-    state.deleteMode = !state.deleteMode;
-    if (state.deleteMode) ui.btnDelMode.classList.add("toggled");
-    else ui.btnDelMode.classList.remove("toggled");
+  // seta (gap)
+  const syncGap = () => ui.gapInput.value = state.arrowGap;
+  ui.gapDec.addEventListener("click", () => { ui.gapInput.value = setArrowGap(state.arrowGap - 10); onRescan(); });
+  ui.gapInc.addEventListener("click", () => { ui.gapInput.value = setArrowGap(state.arrowGap + 10); onRescan(); });
+  ui.gapInput.addEventListener("change", () => {
+    ui.gapInput.value = setArrowGap(parseInt(ui.gapInput.value, 10));
+    onRescan();
   });
+  syncGap();
 
-  // Distância da seta (input e +/−)
-  const syncGapInput = ()=> ui.gapInput && (ui.gapInput.value = String(state.arrowGap));
-  syncGapInput();
-
-  ui.gapInput?.addEventListener("change", ()=>{
-    const val = Number(ui.gapInput.value);
-    if (!Number.isFinite(val)) return;
-    state.arrowGap = Math.max(60, Math.min(480, Math.round(val)));
-    storage.set({ kbf_gap: state.arrowGap });
-    repositionMarkers({pairs:[]}); // reposiciona os já desenhados
+  // delay
+  const syncDelay = () => ui.delayInput.value = state.autoDelayMs;
+  ui.delayDec.addEventListener("click", () => { ui.delayInput.value = setAutoDelay(state.autoDelayMs - 50); });
+  ui.delayInc.addEventListener("click", () => { ui.delayInput.value = setAutoDelay(state.autoDelayMs + 50); });
+  ui.delayInput.addEventListener("change", () => {
+    ui.delayInput.value = setAutoDelay(parseInt(ui.delayInput.value, 10));
   });
-  ui.gapDec?.addEventListener("click", ()=>{
-    state.arrowGap = Math.max(60, state.arrowGap - 5);
-    storage.set({ kbf_gap: state.arrowGap });
-    syncGapInput(); repositionMarkers({pairs:[]});
-  });
-  ui.gapInc?.addEventListener("click", ()=>{
-    state.arrowGap = Math.min(480, state.arrowGap + 5);
-    storage.set({ kbf_gap: state.arrowGap });
-    syncGapInput(); repositionMarkers({pairs:[]});
-  });
-
-  // Delay da auto-busca
-  const syncDelay = () => { if (UI.delayInput) UI.delayInput.value = String(state.autoDelayMs); };
   syncDelay();
 
-  const clampDelay = v => Math.max(80, Math.min(1000, Math.round(v)));
-
-  const onDelayChange = () => {
-    const val = Number(UI.delayInput.value);
-    if (!Number.isFinite(val)) return;
-    state.autoDelayMs = clampDelay(val);
-    storage.set({ kbf_delay: state.autoDelayMs });
+  // excluir (modo)
+  const syncDel = () => {
+    if (state.deleteMode) ui.btnDelMode.classList.add("toggled");
+    else ui.btnDelMode.classList.remove("toggled");
   };
-
-  UI.delayInput.addEventListener("change", onDelayChange);
-  UI.delayDec.addEventListener("click", ()=> {
-    state.autoDelayMs = clampDelay(state.autoDelayMs - 20);
-    storage.set({ kbf_delay: state.autoDelayMs });
-    syncDelay();
+  ui.btnDelMode.addEventListener("click", () => {
+    setDeleteMode(!state.deleteMode);
+    syncDel();
+    // redesenha para habilitar clique nos marcadores
+    onRescan();
   });
-  UI.delayInc.addEventListener("click", ()=> {
-    state.autoDelayMs = clampDelay(state.autoDelayMs + 20);
-    storage.set({ kbf_delay: state.autoDelayMs });
-    syncDelay();
-  });
-
-
-  // Escopo/Desfazer — se você já tiver handlers, conecte aqui; por ora são no-ops
-  ui.btnScope?.addEventListener("click", ()=>{/* opcional: iniciar seleção de escopo */});
-  ui.btnUnscope?.addEventListener("click", ()=>{/* opcional: limpar escopo */});
-
-  // Mostrar/ocultar painel
-  ui.btnHide?.addEventListener("click", ()=>{
-    state.panelVisible = false;
-    storage.set({ kbf_panel_visible: false });
-    applyPanelVisibility();
-  });
-  ui.fab?.addEventListener("click", ()=>{
-    state.panelVisible = true;
-    storage.set({ kbf_panel_visible: true });
-    applyPanelVisibility();
-  });
+  syncDel();
 }
 
-// aplica a visibilidade do painel/fab
-function applyPanelVisibility(){
-  if (!UI) return;
-  UI.panel.style.display = state.panelVisible ? "flex" : "none";
-  UI.fab.style.display   = state.panelVisible ? "none" : "block";
+export function applyPanelVisibility(ui) {
+  // proxy para overlay.applyPanelVisibility (mantido aqui por conveniência)
+  const evt = new CustomEvent("__kbf_apply_panel__", { bubbles: true });
+  ui.panel.dispatchEvent(evt);
 }
+
+// ===== Escopo manual (pick) =====
+export function startScopePick(cbDone) {
+  if (document.body.classList.contains("pick")) return;
+  document.body.classList.add("pick");
+
+  const over = e => (e.target.__kbf_prevOutline = e.target.style.outline, e.target.style.outline = "2px solid #ffd400");
+  const out  = e => (e.target.style.outline = e.target.__kbf_prevOutline || "", delete e.target.__kbf_prevOutline);
+
+  function finish(el) {
+    document.body.classList.remove("pick");
+    document.removeEventListener("mouseover", over, true);
+    document.removeEventListener("mouseout", out, true);
+    document.removeEventListener("click", click, true);
+    setScopeEl(el || null);
+    cbDone?.();
+  }
+  function click(e) {
+    e.preventDefault(); e.stopPropagation();
+    const el = e.target.closest('section, table, [role="rowgroup"], [data-market], .market, .selection, .panel, .table, .widget, div');
+    finish(el || e.target);
+  }
+
+  document.addEventListener("mouseover", over, true);
+  document.addEventListener("mouseout", out, true);
+  document.addEventListener("click", click, true);
+}
+
+export function clearScope(cbDone) {
+  setScopeEl(null);
+  cbDone?.();
+}
+
+// Copia coords da primeira seta (para o AHK)
+export async function copyFirstArrowToClipboard() {
+  const a0 = arrows.find(Boolean);
+  if (!a0) return false;
+
+  const r = a0.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const baseX = (window.mozInnerScreenX !== undefined ? window.mozInnerScreenX : 0);
+  const baseY = (window.mozInnerScreenY !== undefined ? window.mozInnerScreenY : 0);
+
+  const sx = Math.round(baseX + (r.left + r.width / 2) * dpr);
+  const sy = Math.round(baseY + (r.top  + r.height / 2) * dpr);
+  const txt = `${sx},${sy}`;
+
+  try {
+    await navigator.clipboard.writeText(txt);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = txt; document.body.appendChild(ta);
+    ta.select(); document.execCommand("copy"); ta.remove();
+  }
+  return true;
+}
+
+export { clearMarkers, clearBoxes };

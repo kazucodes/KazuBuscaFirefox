@@ -1,67 +1,115 @@
-import { state, loadPersisted } from "./state.js";
-import { ric, debounce } from "./utils.js";
-import { mountOverlay } from "./overlay.js";
-import { wirePanel, drawBadges, clearBoxes, repositionMarkers, updateCounter } from "./ui.js";
+// app/main.js
+import { state, loadPersisted, setPanelVisible, setTargetNumber } from "./state.js";
+import { debounce, raf, ric } from "./utils.js";
+import { mountOverlay, applyPanelVisibility as _applyPanelVisibility } from "./overlay.js";
+import { drawBadges, repositionMarkers, wirePanel, startScopePick, clearScope, copyFirstArrowToClipboard, clearMarkers } from "./ui.js";
 import { collectIcons, collectNumbers } from "./detect.js";
 import { pairIconsAndNumbers } from "./pair.js";
 
-let icons=[], nums=[], pairs=[];
-let scanScheduled=false, tickerActive=false, lastScrollTs=0, stopped=false;
+let UI = null;
+let icons = [], nums = [], pairs = [];
+let scanScheduled = false;
+let tickerActive = false;
+let lastScrollTs = 0;
 
-function rescan(){
-  const root = document;
+function getRoot() {
+  return state.scopeEl || document;
+}
+
+function rescan() {
+  const root = getRoot();
   icons = collectIcons(root);
   nums  = collectNumbers(root);
+  // pareia e filtra por escopo
   pairs = pairIconsAndNumbers(icons, nums);
-  updateCounter({icons, nums, pairs});
+  // (a exclusão por FP é aplicada no drawBadges)
 }
-function draw(){ drawBadges({pairs}); }
-const schedule = debounce(()=>{ if(stopped||!state.enabled) return; rescan(); draw(); }, 120);
 
-function onAnyScroll(){
-  lastScrollTs=performance.now();
-  if(!tickerActive){
-    tickerActive=true;
-    const tick=()=>{
-      repositionMarkers({pairs});
-      if(performance.now()-lastScrollTs<150){ requestAnimationFrame(tick); } else { tickerActive=false; }
+function draw() {
+  drawBadges(UI, pairs);
+}
+
+const schedule = debounce(() => {
+  if (!state.enabled) return;
+  rescan(); draw();
+}, 120);
+
+function scheduleImmediate() {
+  if (!state.enabled) return;
+  rescan(); draw();
+}
+
+// reposicionamento suave enquanto rola/zoom
+function onAnyScroll() {
+  lastScrollTs = performance.now();
+  if (!tickerActive) {
+    tickerActive = true;
+    const tick = () => {
+      repositionMarkers(UI, pairs);
+      if (performance.now() - lastScrollTs < 200) { raf(tick); }
+      else { tickerActive = false; }
     };
-    requestAnimationFrame(tick);
+    raf(tick);
   }
 }
 
-export async function start(registerStop){
-  stopped=false;
-
-  // listeners (uma vez)
-  window.addEventListener("scroll", onAnyScroll, {passive:true, capture:true});
-  window.addEventListener("wheel",  onAnyScroll, {passive:true});
-  window.addEventListener("touchmove", onAnyScroll, {passive:true});
-  window.visualViewport && window.visualViewport.addEventListener("scroll", onAnyScroll, {passive:true});
-  window.visualViewport && window.visualViewport.addEventListener("resize", onAnyScroll, {passive:true});
-  window.addEventListener("resize", schedule, {passive:true});
-
-  const mo = new MutationObserver(()=>{ if(scanScheduled) return; scanScheduled=true; ric(()=>{scanScheduled=false; schedule();}); });
-  mo.observe(document.documentElement,{childList:true,subtree:true,attributes:true});
-
-  await loadPersisted();
-  const ui = mountOverlay();              // desenha painel/host
-  wirePanel({ui, state, schedule, pairs, icons, nums}); // conecta botões
-
-  // Primeira varredura
-  rescan(); draw();
-
-  // watchdog: se não achar nada, relaxa reprocessando
-  setInterval(()=>{ if(stopped || !state.enabled) return;
-    if (icons.length===0 || pairs.length===0) { rescan(); draw(); }
-  }, 1200);
-
-  // debug helper
-  window.KBF = {
-    ping(){ console.log("KBF:", {icons:icons.length, nums:nums.length, pairs:pairs.length, target:state.targetNumber}); },
-  };
-
-  registerStop && registerStop(()=>{ stopped=true; mo.disconnect(); clearBoxes(); });
+function applyPanelVisibility() {
+  _applyPanelVisibility(UI);
 }
 
-export function stop(){ /* preenchido via registerStop no content.js */ }
+// marcar agora (fluxo principal)
+async function markNow(raw) {
+  const v = (raw || "").toString().trim();
+  if (!/^\d{1,2}$/.test(v)) return;
+  setTargetNumber(v);
+  scheduleImmediate();
+  // Atualiza o clipboard com a 1ª seta (para o AHK pegar e mover o mouse)
+  setTimeout(() => { copyFirstArrowToClipboard(); }, 0);
+  // prepara input para a próxima
+  try { UI.input.value = ""; UI.input.focus({ preventScroll: true }); } catch {}
+}
+
+export async function start() {
+  await loadPersisted();
+
+  UI = mountOverlay();
+  // hook interno para applyPanelVisibility via ui.js
+  UI.panel.addEventListener("__kbf_apply_panel__", () => _applyPanelVisibility(UI));
+  applyPanelVisibility();
+
+  wirePanel(UI, {
+    onMarkNow: markNow,
+    onRescan: schedule,
+    onToggleScope: () => startScopePick(() => { scheduleImmediate(); }),
+    onClearScope:  () => { clearScope(() => scheduleImmediate()); }
+  });
+
+  // listeners globais
+  window.addEventListener("scroll", onAnyScroll, { passive: true, capture: true });
+  document.addEventListener("scroll", onAnyScroll, { passive: true, capture: true });
+  (document.scrollingElement || document.documentElement).addEventListener("scroll", onAnyScroll, { passive: true, capture: true });
+  window.addEventListener("wheel", onAnyScroll, { passive: true });
+  window.addEventListener("touchmove", onAnyScroll, { passive: true });
+  window.visualViewport && window.visualViewport.addEventListener("scroll", onAnyScroll, { passive: true });
+  window.visualViewport && window.visualViewport.addEventListener("resize", onAnyScroll, { passive: true });
+
+  window.addEventListener("resize", schedule, { passive: true });
+
+  const mo = new MutationObserver(() => {
+    if (scanScheduled) return;
+    scanScheduled = true;
+    ric(() => { scanScheduled = false; schedule(); });
+  });
+  mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+
+  // Atalho Alt+Shift+M -> copiar coords da 1ª seta
+  document.addEventListener("keydown", (e) => {
+    if (e.altKey && e.shiftKey && (e.key.toLowerCase() === "m")) {
+      e.preventDefault();
+      copyFirstArrowToClipboard();
+    }
+  }, true);
+
+  // primeira varredura
+  scheduleImmediate();
+}

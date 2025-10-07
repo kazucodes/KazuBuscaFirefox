@@ -3,8 +3,6 @@
 import { state, loadPersisted } from "./state.js";
 import { wirePanel } from "./ui.js";
 
-console.log("[KBF] main.js LOADED");
-
 let _timer = 0;
 
 function clearPending() {
@@ -14,7 +12,6 @@ function clearPending() {
 function schedule() {
   clearPending();
   const ms = Math.max(0, Number(state.autoDelayMs) || 0);
-  console.log("[KBF] schedule in", ms, "ms");
   _timer = setTimeout(runScan, ms);
 }
 
@@ -24,19 +21,27 @@ function scheduleImmediate() {
 }
 
 function runScan() {
-  if (!state.enabled) { console.log("[KBF] skipped (disabled)"); return; }
-  console.log("[KBF] runScan at", performance.now().toFixed(1));
-  // rescan(); draw();  // suas funções
+  if (!state.enabled) return;
+
+  // chame suas funções reais aqui (sem quebrar se não existirem):
+  try {
+    if (typeof window.kazuCore?.rescan === "function") window.kazuCore.rescan();
+    else if (typeof rescan === "function") rescan();
+  } catch (e) { /* noop */ }
+
+  try {
+    if (typeof window.kazuCore?.draw === "function") window.kazuCore.draw();
+    else if (typeof draw === "function") draw();
+  } catch (e) { /* noop */ }
 }
 
-// inputs comuns que devem reagendar
+// reagendar em inputs usuais
 function attachInputListeners(root = document) {
   const sel = 'input[type="text"], input[type="search"], textarea, [contenteditable="true"]';
-  const els = Array.from(root.querySelectorAll(sel));
-  els.forEach((el) => {
+  for (const el of root.querySelectorAll(sel)) {
     el.removeEventListener("input", schedule);
     el.addEventListener("input", schedule);
-  });
+  }
 }
 
 function observeDomForInputs() {
@@ -55,13 +60,14 @@ function observeDomForInputs() {
 (async function bootstrap() {
   await loadPersisted();
 
-  // conecta o painel (funciona em Shadow DOM)
+  // conecta os controles do painel
   wirePanel({ schedule, scheduleImmediate });
 
+  // listeners gerais
   attachInputListeners(document);
   const mo = observeDomForInputs();
 
-  // debug helpers
+  // helpers de debug
   Object.assign(window, {
     kazu: {
       state,

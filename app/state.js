@@ -1,4 +1,4 @@
-// app/state.js — estado + persistência do KazuBusca (Firefox WebExtension)
+// app/state.js — estado + persistência (Firefox WebExtension)
 
 export const state = {
   enabled: true,
@@ -29,7 +29,7 @@ async function storageSet(obj) {
     } else {
       for (const [k, v] of Object.entries(obj)) localStorage.setItem(k, JSON.stringify(v));
     }
-  } catch { /* silencioso */ }
+  } catch {}
 }
 
 async function storageGet(keys) {
@@ -53,6 +53,7 @@ async function storageGet(keys) {
 
 export async function loadPersisted() {
   const data = await storageGet([KEYS.enabled, KEYS.autoDelayMs]);
+
   if (Object.prototype.hasOwnProperty.call(data, KEYS.enabled)) {
     state.enabled = toBool(data[KEYS.enabled], state.enabled);
   }
@@ -60,7 +61,6 @@ export async function loadPersisted() {
     state.autoDelayMs = toMs(data[KEYS.autoDelayMs], state.autoDelayMs);
   }
 
-  // refletir mudanças vindas de outras abas/options
   try {
     (browser?.storage || chrome?.storage)?.onChanged.addListener?.((changes, area) => {
       if (area !== "local" && area !== "sync") return;

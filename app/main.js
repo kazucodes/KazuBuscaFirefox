@@ -1,5 +1,4 @@
-// app/main.js — agendador único lendo state.autoDelayMs “ao vivo”
-
+// app/main.js — agendador único lendo o delay do estado (sem debounce fixo)
 import { state, loadPersisted } from "./state.js";
 import { wirePanel } from "./ui.js";
 
@@ -12,30 +11,32 @@ function clearPending() {
 function schedule() {
   clearPending();
   const ms = Math.max(0, Number(state.autoDelayMs) || 0);
+  console.log("[KBF] schedule in", ms, "ms");
   _timer = setTimeout(runScan, ms);
 }
 
 function scheduleImmediate() {
   clearPending();
+  console.log("[KBF] scheduleImmediate");
   runScan();
 }
 
 function runScan() {
-  if (!state.enabled) return;
+  if (!state.enabled) { console.log("[KBF] skipped (disabled)"); return; }
+  console.log("[KBF] runScan at", performance.now().toFixed(1));
 
-  // chame suas funções reais aqui (sem quebrar se não existirem):
+  // chame suas funções reais (não quebra se não existirem):
   try {
     if (typeof window.kazuCore?.rescan === "function") window.kazuCore.rescan();
     else if (typeof rescan === "function") rescan();
-  } catch (e) { /* noop */ }
+  } catch (e) { console.debug("[KBF] rescan error", e); }
 
   try {
     if (typeof window.kazuCore?.draw === "function") window.kazuCore.draw();
     else if (typeof draw === "function") draw();
-  } catch (e) { /* noop */ }
+  } catch (e) { console.debug("[KBF] draw error", e); }
 }
 
-// reagendar em inputs usuais
 function attachInputListeners(root = document) {
   const sel = 'input[type="text"], input[type="search"], textarea, [contenteditable="true"]';
   for (const el of root.querySelectorAll(sel)) {
@@ -58,16 +59,15 @@ function observeDomForInputs() {
 }
 
 (async function bootstrap() {
+  console.log("[KBF] main.js LOADED");
   await loadPersisted();
 
-  // conecta os controles do painel
   wirePanel({ schedule, scheduleImmediate });
 
-  // listeners gerais
   attachInputListeners(document);
   const mo = observeDomForInputs();
 
-  // helpers de debug
+  // helpers p/ depurar no console do content script
   Object.assign(window, {
     kazu: {
       state,
@@ -78,6 +78,6 @@ function observeDomForInputs() {
     },
   });
 
-  // opcional: primeira execução
+  // opcional: dispare uma primeira execução
   // schedule();
 })();

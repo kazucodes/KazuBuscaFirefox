@@ -12,17 +12,8 @@
   "content_scripts": [
     {
       "matches": ["*://*/*"],
-      "js": ["content.js"],
+      "js": ["app/overlay.js", "content.js"],
       "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "app/*.js",
-        "app/**/*.js"
-      ],
-      "matches": ["*://*/*"]
     }
   ],
   "browser_specific_settings": {

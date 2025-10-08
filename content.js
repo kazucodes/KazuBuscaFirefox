@@ -1,15 +1,8 @@
-// KazuBuscaFirefox — content otimizado para BAIXA LATÊNCIA
-// - Scan só no viewport (com margem)
-// - Debounces menores e marcação imediata
-// - Auto-cópia para AHK mais rápida
-// - Sem auto-scroll; mantém recursos (escopo, excluir, gap da seta, Alt+Shift+M)
-
+// content.js — lógica (scan, desenho, delay, storage, Mais/Menos)
 (() => {
   if (window.__KBF_RUNNING__) return;
   window.__KBF_RUNNING__ = true;
 
-  // ---------- Estado & storage ----------
-  const rt = (globalThis.browser?.runtime || globalThis.chrome?.runtime);
   const storage = (globalThis.browser?.storage?.local || globalThis.chrome?.storage?.local);
 
   const state = {
@@ -20,31 +13,36 @@
     deleteMode: false,
     lastCopiedForTarget: null,
     excluded: (globalThis.excluded instanceof Set) ? globalThis.excluded : new Set(),
-    autoDelayMs: 300,  
+    autoDelayMs: 300,
+    // null = automático por largura; true/false = escolha explícita via botão
+    advCollapsed: null,
   };
   globalThis.excluded = state.excluded;
 
   async function loadPersisted() {
     try {
-      const res = await storage.get(["kbf_last_target","kbf_gap","kbf_ignored","kbf_panel_visible","kbf_delay"]);
+      const res = await storage.get([
+        "kbf_last_target","kbf_gap","kbf_ignored","kbf_panel_visible",
+        "kbf_delay","kbf_advCollapsed"
+      ]);
       state.targetNumber = (res.kbf_last_target || "").trim() || null;
       if (Number.isFinite(res.kbf_gap)) state.arrowGap = res.kbf_gap;
       if (Number.isFinite(res.kbf_delay)) state.autoDelayMs = res.kbf_delay;
+      if (typeof res.kbf_panel_visible === "boolean") state.panelVisible = res.kbf_panel_visible;
+      if (typeof res.kbf_advCollapsed === "boolean") state.advCollapsed = res.kbf_advCollapsed;
+
       if (Array.isArray(res.kbf_ignored)) {
         state.excluded.clear();
         for (const k of res.kbf_ignored) state.excluded.add(k);
       }
-      if (typeof res.kbf_panel_visible === "boolean") state.panelVisible = res.kbf_panel_visible;
     } catch {}
   }
   async function persistIgnored(){ try{ await storage.set({ kbf_ignored: Array.from(state.excluded) }); }catch{} }
   const isIgnored = k => state.excluded.has(k);
   const addIgnored = k => state.excluded.add(k);
 
-  // ---------- Utils ----------
   const raf = fn => requestAnimationFrame(fn);
   const ric = window.requestIdleCallback || (fn => setTimeout(fn, 150));
-  const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
   const NUM_RE = /^\s*(\d{1,2})\s*$/;
 
   function getVP(){
@@ -52,7 +50,7 @@
     return v ? { x:v.offsetLeft, y:v.offsetTop, w:v.width, h:v.height }
              : { x:0, y:0, w:innerWidth, h:innerHeight };
   }
-  const VIEW_PAD = 60; // margem extra em volta do viewport
+  const VIEW_PAD = 60;
   function inViewRect(r, pad = VIEW_PAD){
     const V = getVP();
     const L = V.x - pad, T = V.y - pad, R = V.x + V.w + pad, B = V.y + V.h + pad;
@@ -63,121 +61,9 @@
   const near=(a,b)=>Math.hypot((a.left+a.width/2)-(b.left+b.width/2),(a.top+a.height/2)-(b.top+b.height/2))<8;
   const mobile = () => window.innerWidth <= 520 || matchMedia("(max-width:520px)").matches;
 
-  // ---------- Overlay ----------
-  function mountOverlay(){
-    const old=document.getElementById("kbf-host"); if(old) old.remove();
-    const host=document.createElement("div");
-    host.id="kbf-host";
-    Object.assign(host.style,{position:"fixed",left:0,top:0,width:0,height:0,zIndex:2147483647,pointerEvents:"none"});
-    document.documentElement.appendChild(host);
-    const sh=host.attachShadow({mode:"open"});
-    sh.innerHTML=`
-      <style>
-        .layer{position:absolute;inset:0;pointer-events:none;font:13px system-ui,-apple-system,Segoe UI,Roboto,Arial}
-        .ui{position:absolute;inset:0;pointer-events:auto;}
-        .panel{
-          position:fixed;left:10px;top:10px;display:flex;gap:8px;align-items:center;
-          background:rgba(20,20,22,.92);color:#fff;padding:8px;border-radius:12px;
-          border:1px solid rgba(255,255,255,.12);box-shadow:0 8px 24px rgba(0,0,0,.45);
-          pointer-events:auto;user-select:none
-        }
-        .panel input[type="text"]{width:90px;padding:6px 8px;border-radius:8px;border:1px solid #333;background:#0f0f12;color:#fff}
-        .panel .gapBox{display:flex;align-items:center;gap:6px;background:#141416;padding:4px 6px;border-radius:8px;border:1px solid #2b2b2b}
-        .panel .gapBox input{width:60px;padding:4px 6px;border-radius:6px;border:1px solid #333;background:#0f0f12;color:#fff}
-        .panel button{padding:6px 10px;border-radius:10px;border:1px solid #2b2b2b;background:#1b1b1f;color:#eee;cursor:pointer}
-        .panel button.primary{background:#0b5cff;border-color:#0b5cff;color:#fff}
-        .panel button.toggled{background:#ff3b3b;border-color:#ff3b3b;color:#fff}
-        .panel .sep{width:1px;height:18px;background:#333;margin:0 2px}
-        .fab{
-          position:fixed;left:10px;top:10px;width:36px;height:36px;border-radius:18px;background:#0b5cff;color:#fff;border:none;cursor:pointer;
-          display:none;pointer-events:auto;font-weight:700;box-shadow:0 8px 24px rgba(0,0,0,.45)
-        }
-        .marker{
-          position:absolute;width:28px;height:28px;background:#ffd400;color:#1a1a1a;border-radius:10px;font-weight:700;font-size:13px;
-          display:flex;align-items:center;justify-content:center;box-shadow:0 2px 10px rgba(0,0,0,.25);pointer-events:auto;user-select:none;
-          will-change: transform; left:0; top:0;
-        }
-        .marker[data-side="left"]::after{
-          content:"";position:absolute;right:-8px;top:50%;transform:translateY(-50%);
-          border-width:6px;border-style:solid;border-color:transparent transparent transparent #ffd400;
-          filter:drop-shadow(0 0 2px rgba(0,0,0,.2))
-        }
-        .marker[data-side="right"]::after{
-          content:"";position:absolute;left:-8px;top:50%;transform:translateY(-50%);
-          border-width:6px;border-style:solid;border-color:transparent #ffd400 transparent transparent;
-          filter:drop-shadow(0 0 2px rgba(0,0,0,.2))
-        }
-        .arrow{
-          position:absolute;width:26px;height:18px;background:#00E5FF;border-radius:6px;
-          box-shadow:0 2px 10px rgba(0,0,0,.25);pointer-events:none;user-select:none;
-          will-change: transform; left:0; top:0;
-        }
-        .arrow::after{
-          content:"";position:absolute;right:-9px;top:50%;transform:translateY(-50%);
-          border-width:9px 0 9px 9px;border-style:solid;border-color:transparent transparent transparent #00E5FF;
-          filter:drop-shadow(0 0 2px rgba(0,0,0,.2))
-        }
-      </style>
-
-      <div class="layer" id="kbf-layer"></div>
-      <div class="ui" id="kbf-ui"></div>
-
-      <button id="kbf-fab" class="fab" title="Abrir painel">KB</button>
-
-      <div id="kbf-panel" class="panel">
-        <input id="kbf-input" type="text" maxlength="2" inputmode="numeric" placeholder="nº..." />
-        <button id="kbf-go" class="primary">Marcar</button>
-        <button id="kbf-clear">Limpar</button>
-        <button id="kbf-rescan" title="Re-escanear">↻</button>
-
-        <div class="sep"></div>
-        <button id="kbf-scope">Escopo</button>
-        <button id="kbf-unscope">Desfazer</button>
-
-        <div class="sep"></div>
-        <div class="gapBox">
-          <span>Seta</span>
-          <button id="kbf-gap-dec" title="-">–</button>
-          <input id="kbf-gap" type="number" step="5" min="60" max="480" />
-          <button id="kbf-gap-inc" title="+">+</button>
-        </div>
-
-        <div class="sep"></div>
-        <div class="gapBox">
-          <span>Delay</span>
-          <button id="kbf-delay-dec" title="-">–</button>
-          <input id="kbf-delay" type="number" step="20" min="80" max="1000" />
-          <span>ms</span>
-          <button id="kbf-delay-inc" title="+">+</button>
-        </div>
-
-        <div class="sep"></div>
-        <button id="kbf-del" title="Remover falsos positivos">Excluir</button>
-
-        <div class="sep"></div>
-        <button id="kbf-hide" title="Fechar painel">✕</button>
-      </div>
-    `;
-    const ui = {
-      sh,
-      layer: sh.getElementById("kbf-layer"),
-      uiLayer: sh.getElementById("kbf-ui"),
-      panel: sh.getElementById("kbf-panel"),
-      fab: sh.getElementById("kbf-fab"),
-      input: sh.getElementById("kbf-input"),
-      btnGo: sh.getElementById("kbf-go"),
-      btnClear: sh.getElementById("kbf-clear"),
-      btnRescan: sh.getElementById("kbf-rescan"),
-      btnScope: sh.getElementById("kbf-scope"),
-      btnUnscope: sh.getElementById("kbf-unscope"),
-      btnHide: sh.getElementById("kbf-hide"),
-      btnDelMode: sh.getElementById("kbf-del"),
-      gapInput: sh.getElementById("kbf-gap"),
-      gapDec: sh.getElementById("kbf-gap-dec"),
-      gapInc: sh.getElementById("kbf-gap-inc"),
-    };
-    return ui;
-  }
+  // ---------- UI (vem do overlay.js) ----------
+  let UI = null, rendered = [];
+  const mountOverlay = () => window.kbfOverlay?.mountOverlay();
 
   // ---------- Escopo ----------
   let scopeEl=null, pickingScope=false;
@@ -193,7 +79,7 @@
       document.removeEventListener("mouseover", over, true);
       document.removeEventListener("mouseout",  out,  true);
       document.removeEventListener("click", click, true);
-      scopeEl = el || null; scheduleImmediate();
+      scopeEl = el || null; schedule();
     }
     function click(e){
       e.preventDefault(); e.stopPropagation();
@@ -204,9 +90,9 @@
     document.addEventListener("mouseout",  out,  true);
     document.addEventListener("click", click, true);
   }
-  function clearScope(){ scopeEl=null; scheduleImmediate(); }
+  function clearScope(){ scopeEl=null; schedule(); }
 
-  // ---------- Detect (só viewport) ----------
+  // ---------- Detect (viewport) ----------
   const SELECTOR=["img","svg","div","span","[role='img']","[data-icon]","[class*='avatar']","[class*='shirt']","[class*='camisa']","[class*='player']"].join(",");
   function isIconish(r,loose=false){const ar=r.width/Math.max(1,r.height); if(loose)return r.height>=12&&r.height<=220&&r.width>=12&&r.width<=220&&ar>0.25&&ar<3.2; return r.height>=(mobile()?10:16)&&r.height<=180&&r.width>=(mobile()?10:16)&&r.width<=180&&ar>0.35&&ar<2.8;}
   function dedupeSort(list){const arr=[...list].sort((a,b)=>a.rect.top-b.rect.top||a.rect.left-b.rect.left);const keep=[];for(const c of arr){const clash=keep.find(k=>rectIoU(k.rect,c.rect)>0.55||near(k.rect,c.rect));if(!clash)keep.push(c);}return keep;}
@@ -216,7 +102,7 @@
     root.querySelectorAll(SELECTOR).forEach(el=>{
       if (el.closest("#kbf-host")) return;
       const r=el.getBoundingClientRect();
-      if (!inViewRect(r)) return;         // <<< só visível
+      if (!inViewRect(r)) return;
       if (isIconish(r)) raw.push({el,rect:r});
     });
     let icons=dedupeSort(raw);
@@ -240,14 +126,13 @@
 
   function collectNumbers(root=getRoot()){
     const found=[];
-    // walker — filtra por viewport no parent imediatamente
     const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,{
       acceptNode:n=>{
         const t=(n.textContent||"").trim();
         if (!(t.length<=3 && NUM_RE.test(t))) return NodeFilter.FILTER_REJECT;
         const el=n.parentElement; if(!el) return NodeFilter.FILTER_REJECT;
         const r=el.getBoundingClientRect();
-        return inViewRect(r) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; // <<< só viewport
+        return inViewRect(r) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
       }
     });
     let nd; while((nd=walker.nextNode())){
@@ -257,12 +142,11 @@
       found.push({el,num,rect:el.getBoundingClientRect(),source:"text"});
     }
 
-    // atributos (também só viewport)
     const attrQ="[data-number],[data-num],[aria-label],[title],img[alt]";
     root.querySelectorAll(attrQ).forEach(el=>{
       if (el.closest("#kbf-host")) return;
       const r=el.getBoundingClientRect();
-      if (!inViewRect(r)) return; // <<< só viewport
+      if (!inViewRect(r)) return;
       if (isClickable(el)||isOddsish(el)||badFont(el)) return;
       const cand=[el.getAttribute("data-number"),el.getAttribute("data-num"),el.getAttribute("aria-label"),el.getAttribute("title"),el.getAttribute("alt")].find(Boolean);
       if(!cand) return;
@@ -326,9 +210,9 @@
     return out;
   }
 
-  // ---------- UI / desenho ----------
+  // ---------- Desenho ----------
   const BADGE_W=28,BADGE_H=28,ARROW_W=26,ARROW_H=18,EDGE_PAD=2;
-  let UI=null, rendered=[];
+
   function computeBadgePos(rect){
     const V=getVP(); const viewportLeft=V.x+EDGE_PAD, viewportRight=V.x+V.w-EDGE_PAD;
     const wantLeft=rect.left-BADGE_W-8; const leftOK=wantLeft>=viewportLeft;
@@ -365,7 +249,6 @@
     clearBoxes();
     if(!state.enabled||!state.targetNumber||!UI) return;
     const t=String(state.targetNumber);
-    let first=null;
 
     pairs.forEach(p=>{
       if(String(p.num)!==t) return;
@@ -374,7 +257,7 @@
       const ir=p.iconEl.getBoundingClientRect();
       const m=document.createElement("div"); m.className="marker"; m.textContent=p.num;
       const b=computeBadgePos(ir); m.style.left=b.left+"px"; m.style.top=b.top+"px"; m.dataset.side=b.side;
-      m.addEventListener("click", async (e)=>{ if(!state.deleteMode) return; e.preventDefault(); e.stopPropagation(); addIgnored(key); await persistIgnored(); try{m.remove();}catch{} try{a.remove();}catch{} }, true);
+      m.addEventListener("click", async (e)=>{ if(!state.deleteMode) return; e.preventDefault(); e.stopPropagation(); addIgnored(key); await persistIgnored(); try{m.remove();}catch{} }, true);
       UI.layer.appendChild(m);
 
       const a=document.createElement("div"); a.className="arrow";
@@ -382,16 +265,15 @@
       UI.layer.appendChild(a);
 
       rendered.push({m,a,p});
-      if(!first) first=ir;
     });
 
-    // auto-cópia: delay mínimo
     if (rendered.length && state.targetNumber) {
+      const wait = Math.max(5, Math.min(2000, Number(state.autoDelayMs) || 300));
       if (state.lastCopiedForTarget !== state.targetNumber) {
         setTimeout(async () => {
           const ok = await copyFirstArrowToClipboard();
           if (ok) state.lastCopiedForTarget = state.targetNumber;
-        }, 5);
+        }, wait);
       }
     }
   }
@@ -409,26 +291,46 @@
     UI.fab.style.display   = state.panelVisible ? "none" : "block";
   }
 
+  // ---------- Scheduler ----------
+  let _sched = 0;
+  const getCurrentDelay = () => Math.max(0, Math.min(2000, Math.round(Number(state.autoDelayMs) || 300)));
+  function schedule() {
+    clearTimeout(_sched);
+    if (!state.enabled) return;
+    const ms = getCurrentDelay();
+    _sched = setTimeout(() => {
+      if (!state.enabled) return;
+      rescan(); draw();
+      try { console.debug("[KBF] run (delay:", ms, "ms)"); } catch {}
+    }, ms);
+    try { console.debug("[KBF] schedule in", ms, "ms"); } catch {}
+  }
+  function scheduleImmediate(){
+    clearTimeout(_sched);
+    if (!state.enabled) return;
+    rescan(); draw();
+  }
+
   function wirePanel(scheduleImmediate){
     applyPanelVisibility();
-    UI.btnHide.addEventListener("click", ()=>{ state.panelVisible=false; storage.set({kbf_panel_visible:false}); applyPanelVisibility(); });
-    UI.fab.addEventListener("click",  ()=>{ state.panelVisible=true;  storage.set({kbf_panel_visible:true});  applyPanelVisibility(); });
+    UI.btnHide?.addEventListener("click", ()=>{ state.panelVisible=false; storage.set({kbf_panel_visible:false}); applyPanelVisibility(); });
+    UI.fab?.addEventListener("click",  ()=>{ state.panelVisible=true;  storage.set({kbf_panel_visible:true});  applyPanelVisibility(); });
 
-    // auto-busca com latência baixa
+    // trigger ao digitar
     let typingTimer=null;
     const trigger = (v) => {
       if(!/^\d{1,2}$/.test(v)) return;
       state.targetNumber=v; state.lastCopiedForTarget=null;
       storage.set({kbf_last_target:v});
-      scheduleImmediate(); // <<< sem debounce extra
+      scheduleImmediate();
       UI.input.value=""; UI.input.focus({preventScroll:true});
     };
     UI.input.addEventListener("input", ()=>{
       if (typingTimer) clearTimeout(typingTimer);
-      const delay = Math.max(60, Math.min(2000, state.autoDelayMs)); // usa o valor do painel
+      const delay = getCurrentDelay();
       typingTimer = setTimeout(()=> trigger((UI.input.value||"").trim()), delay);
     });
-    UI.btnGo.addEventListener("click", ()=> trigger((UI.input.value||"").trim()));
+    UI.btnGo?.addEventListener("click", ()=> trigger((UI.input.value||"").trim()));
     UI.input.addEventListener("keydown",(e)=>{ if(e.key==="Enter"){ e.preventDefault(); trigger((UI.input.value||"").trim()); }});
 
     UI.btnClear.addEventListener("click", ()=>{
@@ -436,15 +338,14 @@
       storage.set({kbf_last_target:""});
       clearBoxes(); UI.input.value=""; UI.input.focus({preventScroll:true});
     });
-    UI.btnRescan.addEventListener("click", ()=> scheduleImmediate());
+    UI.btnRescan?.addEventListener("click", ()=> scheduleImmediate());
 
-    // Excluir toggle
-    UI.btnDelMode.addEventListener("click", ()=>{
+    UI.btnDelMode?.addEventListener("click", ()=>{
       state.deleteMode=!state.deleteMode;
       UI.btnDelMode.classList.toggle("toggled", state.deleteMode);
     });
 
-    // gap da seta
+    // gap
     const syncGap=()=> UI.gapInput && (UI.gapInput.value=String(state.arrowGap));
     syncGap();
     const onGapChange = ()=>{
@@ -453,23 +354,73 @@
       storage.set({kbf_gap:state.arrowGap});
       repositionMarkers(pairs);
     };
-    UI.gapInput.addEventListener("change", onGapChange);
-    UI.gapDec.addEventListener("click", ()=>{ state.arrowGap=Math.max(60,state.arrowGap-5); storage.set({kbf_gap:state.arrowGap}); syncGap(); repositionMarkers(pairs); });
-    UI.gapInc.addEventListener("click", ()=>{ state.arrowGap=Math.min(480,state.arrowGap+5); storage.set({kbf_gap:state.arrowGap}); syncGap(); repositionMarkers(pairs); });
+    UI.gapInput?.addEventListener("change", onGapChange);
+    UI.gapDec?.addEventListener("click", ()=>{ state.arrowGap=Math.max(60,state.arrowGap-5); storage.set({kbf_gap:state.arrowGap}); syncGap(); repositionMarkers(pairs); });
+    UI.gapInc?.addEventListener("click", ()=>{ state.arrowGap=Math.min(480,state.arrowGap+5); storage.set({kbf_gap:state.arrowGap}); syncGap(); repositionMarkers(pairs); });
+
+    // delay
+    const clampDelay = v => {
+      const min = Number(UI.delayInput?.min)  || 80;
+      const max = Number(UI.delayInput?.max)  || 1000;
+      let n = Math.round(Number(v));
+      if (!Number.isFinite(n)) n = state.autoDelayMs || 300;
+      return Math.max(min, Math.min(max, n));
+    };
+    const syncDelay = () => { if (UI.delayInput) UI.delayInput.value = String(state.autoDelayMs); };
+    const persistDelay = () => { try { storage.set({ kbf_delay: state.autoDelayMs }); } catch {} };
+    syncDelay();
+
+    UI.delayInput?.addEventListener("input", () => {
+      state.autoDelayMs = clampDelay(UI.delayInput.value);
+      syncDelay(); persistDelay(); schedule();
+    });
+    UI.delayInput?.addEventListener("change", () => {
+      state.autoDelayMs = clampDelay(UI.delayInput.value);
+      syncDelay(); persistDelay(); schedule();
+    });
+    UI.delayDec?.addEventListener("click", (e) => {
+      e.preventDefault();
+      const step = Number(UI.delayInput?.step) || 20;
+      const cur  = clampDelay(UI.delayInput?.value ?? state.autoDelayMs);
+      state.autoDelayMs = clampDelay(cur - step);
+      syncDelay(); persistDelay(); schedule();
+    });
+    UI.delayInc?.addEventListener("click", (e) => {
+      e.preventDefault();
+      const step = Number(UI.delayInput?.step) || 20;
+      const cur  = clampDelay(UI.delayInput?.value ?? state.autoDelayMs);
+      state.autoDelayMs = clampDelay(cur + step);
+      syncDelay(); persistDelay(); schedule();
+    });
+    UI.delayInput?.addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+      e.preventDefault();
+      const step = Number(UI.delayInput?.step) || 20;
+      const cur  = clampDelay(UI.delayInput?.value ?? state.autoDelayMs);
+      state.autoDelayMs = clampDelay(cur + (e.key === "ArrowUp" ? step : -step));
+      syncDelay(); persistDelay(); schedule();
+    });
 
     // escopo
-    UI.btnScope.addEventListener("click", ()=> startScopePick());
-    UI.btnUnscope.addEventListener("click", ()=> clearScope());
+    UI.btnScope?.addEventListener("click", ()=> startScopePick());
+    UI.btnUnscope?.addEventListener("click", ()=> clearScope());
+
+    // Mais / Menos — clique sempre vence
+    UI.btnMore.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const next = !getCollapsedDesired();
+      state.advCollapsed = next;
+      try { storage.set({ kbf_advCollapsed: next }); } catch {}
+      renderCollapsed();
+    });
   }
 
   // ---------- Pipeline / scroll ----------
-  let icons=[], nums=[], pairs=[], scanScheduled=false, tickerActive=false, lastScrollTs=0, stopped=false;
+  let icons=[], nums=[], pairs=[], tickerActive=false, lastScrollTs=0;
 
   function rescan(){ const root=getRoot(); icons=collectIcons(root); nums=collectNumbers(root); pairs=pairIconsAndNumbers(icons,nums); }
   function draw(){ drawBadges(pairs); }
-
-  const schedule = debounce(()=>{ if(stopped||!state.enabled) return; rescan(); draw(); }, 60);
-  function scheduleImmediate(){ if(stopped||!state.enabled) return; rescan(); draw(); }
 
   function onAnyScroll(){
     lastScrollTs=performance.now();
@@ -486,30 +437,43 @@
   window.visualViewport && window.visualViewport.addEventListener("resize", onAnyScroll, {passive:true});
   window.addEventListener("resize", schedule, {passive:true});
 
-  const mo=new MutationObserver(()=>{
-    if(scanScheduled) return;
-    scanScheduled=true;
-    ric(()=>{ scanScheduled=false; schedule(); });
-  });
+  const mo=new MutationObserver(()=>{ ric(()=> schedule()); });
   mo.observe(document.documentElement,{childList:true,subtree:true,attributes:true});
 
-  // ---------- Alt+Shift+M manual ----------
+  // ---------- Alt+Shift+M ----------
   document.addEventListener("keydown",(e)=>{ if(e.altKey&&e.shiftKey&&e.key.toLowerCase()==="m"){ e.preventDefault(); (async()=>{ await copyFirstArrowToClipboard(); })(); } }, true);
+
+  // ---------- Colapso/compacto ----------
+  function getCollapsedDesired() {
+    const auto = window.innerWidth < 560;
+    return (state.advCollapsed === null) ? auto : !!state.advCollapsed;
+  }
+  function renderCollapsed() {
+    const collapsed = getCollapsedDesired();
+    UI.panel.classList.toggle('collapsed', collapsed);
+    if (UI.btnMore) UI.btnMore.textContent = collapsed ? "Mais ▾" : "Menos ▴";
+  }
+  function fitPanel() {
+    UI.panel.classList.toggle('compact', window.innerWidth < 560);
+    renderCollapsed();
+  }
 
   // ---------- Boot ----------
   (async()=>{
     try{
       await loadPersisted();
-      UI = mountOverlay();              // <- correto: usa a 'UI' global já declarada
-      window.__KBF_UI__ = UI;
-      applyPanelVisibility();           // garante o estado salvo do painel
+      UI = mountOverlay();
+      window.__KBF_UI__ = UI;   // debug
+      window.kbfState   = state;
+      applyPanelVisibility();
       wirePanel(scheduleImmediate);
-      rescan(); draw();
+      fitPanel();
+      window.addEventListener('resize', fitPanel, { passive:true });
+      schedule();
     }catch(err){
       console.error("KBF erro (boot):", err);
       alert("KBF erro: " + err.message);
     }
-})();
-
+  })();
 
 })();

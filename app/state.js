@@ -1,71 +1,109 @@
-// app/state.js — estado global + persistência
-(function (global) {
-  "use strict";
+// app/state.js — estado + storage (+ delay centralizado)
 
-  const STORAGE_DELAY   = "kbf_delay";
-  const STORAGE_ENABLED = "kbf_enabled";
+const KEY_ENABLED = "kbf_enabled";
+const KEY_IGNORED = "kbf_ignored";
+const KEY_DELAY_A = "kbf:autoDelayMs"; // compat
+const KEY_DELAY_B = "kbf_delay";       // compat
+const DEFAULT_DELAY = 120;
 
-  function clamp(n, lo, hi) {
-    n = Number(n);
-    if (!Number.isFinite(n)) n = lo;
-    n = Math.round(n);
-    return Math.min(hi, Math.max(lo, n));
-  }
-
-  const storage = {
-    async get(key, defVal) {
-      try {
-        if (typeof browser !== "undefined" && browser.storage?.local) {
-          const o = await browser.storage.local.get(key);
-          return o && o[key] !== undefined ? o[key] : defVal;
-        }
-        if (typeof chrome !== "undefined" && chrome.storage?.local) {
-          const o = await new Promise(r => chrome.storage.local.get(key, r));
-          return o && o[key] !== undefined ? o[key] : defVal;
-        }
-      } catch {}
-      try { const raw = localStorage.getItem(key); return raw == null ? defVal : JSON.parse(raw); }
-      catch { return defVal; }
-    },
-    async set(obj) {
-      try {
-        if (typeof browser !== "undefined" && browser.storage?.local) return void (await browser.storage.local.set(obj));
-        if (typeof chrome !== "undefined" && chrome.storage?.local)  return void (await new Promise(r => chrome.storage.local.set(obj, r)));
-      } catch {}
-      try { for (const k in obj) localStorage.setItem(k, JSON.stringify(obj[k])); } catch {}
+// ---------- Storage helpers ----------
+async function storageGet(key, def) {
+  try {
+    if (typeof browser !== "undefined" && browser.storage?.local) {
+      const o = await browser.storage.local.get(key);
+      return (o && o[key] !== undefined) ? o[key] : def;
     }
-  };
+    if (typeof chrome !== "undefined" && chrome.storage?.local) {
+      const o = await new Promise(r => chrome.storage.local.get(key, r));
+      return (o && o[key] !== undefined) ? o[key] : def;
+    }
+  } catch {}
+  try { const raw = localStorage.getItem(key); return raw == null ? def : JSON.parse(raw); } catch { return def; }
+}
 
-  const state = global.state || {
+async function storageSet(obj) {
+  try {
+    if (typeof browser !== "undefined" && browser.storage?.local) return void (await browser.storage.local.set(obj));
+    if (typeof chrome !== "undefined" && chrome.storage?.local)  return void (await new Promise(r => chrome.storage.local.set(obj, r)));
+  } catch {}
+  try { for (const [k, v] of Object.entries(obj)) localStorage.setItem(k, JSON.stringify(v)); } catch {}
+}
+
+// ---------- Estado global ----------
+export const state =
+  (window.kbf && window.kbf.state) ||
+  (window.kbf = Object.assign(window.kbf || {}, { state: {
     enabled: true,
-    autoDelayMs: 120
-  };
-  global.state = state;
+    ignored: [],
+    autoDelayMs: DEFAULT_DELAY,   // delay em memória
+  }})).state;
 
-  async function loadState() {
-    state.autoDelayMs = clamp(await storage.get(STORAGE_DELAY, state.autoDelayMs ?? 120), 0, 10000);
-    state.enabled     = !!(await storage.get(STORAGE_ENABLED, state.enabled ?? true));
-  }
+// ---------- Delay ----------
+const clamp = (n) => {
+  n = Number(n);
+  if (!Number.isFinite(n)) n = DEFAULT_DELAY;
+  n = Math.round(n);
+  return Math.min(10000, Math.max(0, n));
+};
 
-  async function setDelayMs(ms) {
-    state.autoDelayMs = clamp(ms, 0, 10000);
-    await storage.set({ [STORAGE_DELAY]: state.autoDelayMs });
-  }
+function loadDelayLocal() {
+  try { const a = localStorage.getItem(KEY_DELAY_A); if (a != null) return clamp(JSON.parse(a)); } catch {}
+  try { const b = localStorage.getItem(KEY_DELAY_B); if (b != null) return clamp(JSON.parse(b)); } catch {}
+  return DEFAULT_DELAY;
+}
+function saveDelayLocal(v) {
+  v = clamp(v);
+  try { localStorage.setItem(KEY_DELAY_A, JSON.stringify(v)); } catch {}
+  try { localStorage.setItem(KEY_DELAY_B, JSON.stringify(v)); } catch {}
+}
 
-  function getDelayMs() {
-    return clamp(state.autoDelayMs ?? 120, 0, 10000);
-  }
+export function getDelayMs() {
+  const v = clamp(state.autoDelayMs ?? loadDelayLocal());
+  // mantém sincronizado em memória
+  state.autoDelayMs = v;
+  return v;
+}
 
-  async function setEnabled(on) {
-    state.enabled = !!on;
-    await storage.set({ [STORAGE_ENABLED]: state.enabled });
-  }
+export function setDelayMs(v, { persist = true, schedule = true } = {}) {
+  const n = clamp(v);
+  state.autoDelayMs = n;
+  if (persist) saveDelayLocal(n);
+  if (schedule) try { window.kbf?.schedule?.(); } catch {}
+  return n;
+}
 
-  global.kbf = Object.assign(global.kbf || {}, {
-    state,
-    loadState,
-    setDelayMs,
-    getDelayMs,
-    setEnabled
-  });
-})(window);
+// ---------- Enabled / Ignored ----------
+export async function loadState() {
+  state.enabled = !!(await storageGet(KEY_ENABLED, state.enabled ?? true));
+  const ignored = await storageGet(KEY_IGNORED, []);
+  state.ignored = Array.isArray(ignored) ? [...new Set(ignored.map(Number).filter(Number.isFinite))] : [];
+  // Delay inicial
+  state.autoDelayMs = clamp(state.autoDelayMs ?? loadDelayLocal());
+  saveDelayLocal(state.autoDelayMs);
+  return state;
+}
+
+export async function setEnabled(on) {
+  state.enabled = !!on;
+  await storageSet({ [KEY_ENABLED]: state.enabled });
+  return state.enabled;
+}
+
+export function getIgnored() {
+  return Array.isArray(state.ignored) ? [...new Set(state.ignored.map(Number).filter(Number.isFinite))] : [];
+}
+
+export async function persistIgnored(list) {
+  const arr = Array.isArray(list) ? list : [];
+  const clean = [...new Set(arr.map(Number).filter(Number.isFinite))];
+  state.ignored = clean;
+  await storageSet({ [KEY_IGNORED]: clean });
+  return clean;
+}
+
+// ---------- API global p/ debug ----------
+Object.assign(window.kbf || (window.kbf = {}), {
+  state, getDelayMs, setDelayMs,
+});
+
+export default state;

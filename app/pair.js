@@ -1,3 +1,4 @@
+
 // app/pair.js
 // Pareamento ícone ↔ número com filtros rígidos (janela horizontal + overlap vertical)
 

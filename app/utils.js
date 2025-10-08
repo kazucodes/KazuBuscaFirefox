@@ -1,3 +1,4 @@
+
 export const raf  = fn => requestAnimationFrame(fn);
 export const ric  = window.requestIdleCallback || (fn=>setTimeout(fn, 200));
 export const debounce = (fn,ms)=>{ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a),ms); }; };
